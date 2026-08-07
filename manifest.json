@@ -1,0 +1,34 @@
+{
+  "id": "flashcards",
+  "name": "记忆闪卡",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "`.deck.md` 卡组文件 + FSRS 间隔重复复习台。卡片与复习进度全部存在本地笔记库(卡组 = 一等 .deck.md 文件,调度状态在文件 frontmatter 里,索引在插件工作文件夹,默认「记忆闪卡」);「从当前笔记生成卡组」会把当前笔记全文发送到你登录的 Forsion/Tangu 后端由 AI 出卡,除此之外数据不出本机。随包附带 flashcard-format 技能,让 Tangu 在聊天里也能直接建/改卡组而不破坏复习进度。",
+  "main": "main.js",
+  "fileExtensions": [".deck.md"],
+  "events": [
+    { "name": "review", "label": "完成一轮复习" }
+  ],
+  "onboarding": {
+    "intro": "记忆闪卡把知识拆成问答卡片,用 FSRS 间隔重复安排每天该复习什么。卡组是笔记库里的 .deck.md 文件——可备份、可同步、可让 Tangu 直接读写。",
+    "steps": [
+      {
+        "title": "建一组卡",
+        "description": "文件树空白处或文件夹上右键「新建卡组」即建即开;卡组编辑视图里可就地改问题/答案、加卡删卡。手改内容不影响每张卡的复习进度。"
+      },
+      {
+        "title": "让 AI 从笔记出卡",
+        "description": "打开一篇笔记,命令面板运行「记忆闪卡:从当前笔记生成卡组」。生成进度显示在复习台顶部,可随时取消;生成的卡组落在插件工作文件夹(默认「记忆闪卡」)。"
+      },
+      {
+        "title": "每天复习",
+        "description": "命令面板「记忆闪卡:打开复习台」。空格/回车翻面,1-4 评分(重来/困难/记得/简单),FSRS 自动安排下次出现时间;每日新卡上限可在插件设置里调(默认 50)。"
+      },
+      {
+        "title": "让 Tangu 也会写卡组",
+        "description": "随包的 flashcard-format 技能教会了 Tangu .deck.md 的真实格式(card 标记 + fsrs 状态行)。在聊天里直接说「帮我把这篇笔记做成闪卡」也能得到规范的卡组文件——建好后在文件树里打开一次,它就会进入复习队列。"
+      }
+    ],
+    "settings": true
+  }
+}

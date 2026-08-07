@@ -1,0 +1,10 @@
+{
+  "id": "flashcards",
+  "name": { "zh": "记忆闪卡", "en": "Flashcards" },
+  "icon": "target",
+  "version": "1.0.0",
+  "layout": {
+    "main": [{ "type": "plugin:flashcards:review" }]
+  },
+  "requires": { "views": ["plugin:flashcards:review"] }
+}
