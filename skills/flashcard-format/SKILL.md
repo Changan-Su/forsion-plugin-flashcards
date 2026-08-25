@@ -1,7 +1,7 @@
 ---
 name: flashcard-format
 description: Read, create, and edit Forsion flashcard decks (`.deck.md`) without corrupting card IDs or FSRS review state. Use this whenever the user asks you to build, extend, or clean up flashcards / spaced-repetition decks ("make flashcards from this note", "add cards to my deck", "fix my deck file").
-version: 1.0.0
+version: 1.1.0
 author: Forsion
 category: Forsion
 ---
@@ -49,6 +49,25 @@ For a brand-new deck, `fsrs:` is just `{}` — new cards have NO fsrs entry; the
 8. **Never touch `.deck-index.json`** in the plugin's work folder — it is plugin-internal and self-healing; the plugin rebuilds rows when a deck is opened or reviewed.
 9. **After creating a NEW deck file yourself, tell the user to open it once** (click it in the file tree). The plugin indexes decks on open/review — it does not scan folders — so a deck created in chat will not appear in the review queue until it has been opened once. The same applies after moving or renaming a deck file.
 10. If card content must show a literal `<!-- card:ID -->` line as text (e.g. a card teaching this very format), write it escaped as `<!-- card\:ID -->` on its own line — the plugin unescapes it when displaying and re-escapes on save. An unescaped marker line inside card content would be parsed as a real card boundary.
+11. **Never "review" a card on the user's behalf.** Grades, FSRS scheduling, the daily new-card allowance, streaks and achievements are all produced by the review board. Writing an `fsrs:` entry for a card the user has never seen is fabricating their learning record. A new card simply has no fsrs entry (see the template note above) — leave it that way.
+12. **One deck per request.** When a long note could become several decks, build the one the user asked for and say what else you saw. Rule 6's atomicity applies to cards, not to spraying deck files across the vault.
+
+## Routing: do it yourself, or send them to the review board
+
+A deck is an ordinary file in the vault, so building one does not require the plugin to be running.
+What the plugin owns is scheduling and the review UI. Pick the lane before you start:
+
+| Situation | What to do |
+|---|---|
+| You have the file tools and your Amadeus section shows a **local** vault | Do it yourself: `glob_files` for `*.deck.md`, `read_file` to inspect, `write_file` to create or extend, following the hard rules above. Then tell the user to open the new deck once (rule 9). |
+| The user means "**this** note / the one I'm looking at" and you cannot tell which file that is | Say so — you cannot see which note is open on their desktop — and ask for the path. If they would rather not, send them to the command palette entry "Flashcards: Generate deck from note": it sends the note's full text to the backend, shows progress at the top of the review board, and can be cancelled. |
+| Cloud vault, or you have no file tools | Send them to the command palette and stop. Do **not** fall back to `amadeus_write_note` — it rewrites the file as a plain note and destroys the `fsrs:` frontmatter. |
+
+Reviewing itself is never yours: "Flashcards: Open review board" is the only place cards get graded.
+
+Command titles are a snapshot of the UI language at registration time, so the palette may show the
+Chinese titles instead. Tell the user to search the palette for "flashcard" (the commands carry both
+languages as keywords) rather than quoting a title you cannot be sure of.
 
 ## Which tools to read/write with
 

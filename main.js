@@ -12,6 +12,8 @@
  * 引擎接入(照 bluebird 配方,纯文本 run:不指定 agent、不要宿主执行面,默认助手即可):
  *   POST /agent/runs + SSE /events,模型回一个 ```deck 代码块,插件自己解析、分配 ID、writeFile。
  * 安全:模型/用户产出的 Markdown 一律走自建 renderMarkdown(只 createElement+textContent)。
+ * 双语(1.1.0):UI 文案全部走 MSG/t(),语言取 ctx.getLocale(),订 ctx.subscribeLocale 原地重绘
+ *   (视图不重挂也要变);卡组名/问答正文/落盘路径/localStorage 键/默认工作文件夹一律不随语言变。
  */
 const PLUGIN_ID = 'flashcards'
 const APP_ID = 'tangu'
@@ -24,8 +26,257 @@ const uuid = () => (globalThis.crypto && crypto.randomUUID ? crypto.randomUUID()
 const lsGet = (k, d) => { try { const v = localStorage.getItem(`plugin.${PLUGIN_ID}.${k}`); return v == null ? d : v } catch { return d } }
 const lsSet = (k, v) => { try { localStorage.setItem(`plugin.${PLUGIN_ID}.${k}`, v) } catch { /* ignore */ } }
 const lsJSON = (k, d) => { try { const o = JSON.parse(lsGet(k, '')); return o && typeof o === 'object' ? o : d } catch { return d } }
+
+// ── 双语词表(2026-08-14 起 ctx.getLocale / ctx.subscribeLocale;两侧键集合必须完全相等) ──
+// 只翻 UI 文案。用户数据(卡组名 / 问题 / 答案 / 笔记正文)、落盘路径、localStorage 键、
+// 默认工作文件夹一律不随语言变 —— 切成英文不该像换了个数据目录。
+const MSG = {
+  zh: {
+    appName: '记忆闪卡',
+    deckFileType: '卡组',
+    cancel: '取消',
+    ok: '确定',
+    dismiss: '知道了',
+    refresh: '刷新',
+    refreshTip: '重新收集到期卡片',
+    open: '打开',
+    review: '复习',
+    delete: '删除',
+    heroBlurb: '把知识拆成卡片,用 FSRS 间隔重复对抗遗忘。卡组是笔记库里的 .deck.md 文件,复习进度也存在文件里。',
+    genFromNote: '从当前笔记生成卡组',
+    newDeck: '新建卡组',
+    guideHint: '也可以在文件树右键「新建卡组」,或在聊天里让 Tangu 直接写一份 .deck.md(随包 flashcard-format 技能已教会它格式;聊天里建的卡组在文件树里打开一次即进入复习队列)。',
+    guideHintLegacy: '当前宿主版本较旧,不支持 .deck.md 一等文件类型:复习台可用,新建 / AI 建卡入口已隐藏。升级 Forsion 桌面端后解锁。',
+    deckCount: '{n} 个卡组',
+    scopeChip: '只看:{name} ✕',
+    loading: '正在收集到期卡片…',
+    progressToday: '今日进度 · 已复习 {n} 张',
+    progressLeft: ' · 剩余 {n} 张',
+    genRunning: 'AI 建卡:{label} · {pct}%',
+    genFailed: 'AI 建卡失败:{err}',
+    genBusy: '进行中',
+    stageSubmit: '提交任务',
+    stageQueued: '排队中',
+    stageReading: '模型阅读笔记中',
+    stageWriting: '生成卡片中',
+    stageDone: '完成',
+    idleNoneScoped: '这组暂无到期卡片',
+    idleNone: '暂无到期卡片',
+    idleToday: '今天已复习 {n} 张',
+    idleHeld: ' · 还有 {n} 张新卡因每日上限({lim})暂缓,明天见',
+    decksLabel: '卡组',
+    deckRowCounts: '{cards} 张 · {due} 到期',
+    doneTitle: '今日复习完成!',
+    doneSession: '本次复习 {n} 张',
+    doneToday: '今天累计 {n} 张',
+    doneStreak: '连续 {n} 天',
+    doneAgain: '再查一遍到期卡片',
+    cardMeta: '{deck} · {kind} · 第 {i} / {n} 张',
+    emptyQ: '(空问题)',
+    emptyA: '(空答案)',
+    showAnswer: '显示答案',
+    kbdFlip: '空格 / 回车 翻面',
+    kbdRate: '按 1-4 评分:1 重来 · 2 困难 · 3 记得 · 4 简单',
+    rate1: '重来',
+    rate2: '困难',
+    rate3: '记得',
+    rate4: '简单',
+    stateNew: '新卡',
+    stateLearning: '学习中',
+    stateRelearning: '重学中',
+    stateDue: '到期',
+    stateIn: '{d}后',
+    deltaMin: '{n} 分钟',
+    deltaHour: '{n} 小时',
+    deltaDay: '{n} 天',
+    deckNamePh: '卡组名',
+    addCard: '加卡',
+    reviewThisDeck: '复习本组',
+    editorStats: '{n} 张卡 · {due} 张到期 · {fresh} 张新卡',
+    editorStatsBroken: ' · fsrs 行损坏(已原样保留,复习暂停)',
+    editorEmpty: '这组还没有卡片。点右上角「加卡」写第一张;或打开一篇笔记,用命令「记忆闪卡:从当前笔记生成卡组」交给 AI。',
+    qLabel: '问题 Q',
+    aLabel: '答案 A',
+    qPh: '支持多行 markdown',
+    aPh: '答案尽量短',
+    deckMissing: '读不到这个卡组文件(可能已被移动或删除)。',
+    deckInvalid: '这个文件不符合 .deck.md 卡组格式(没有 frontmatter,也没有 <!-- card:cN --> 标记)。为避免误覆盖内容,已停用编辑与自动保存;请手动补格式或改回普通 .md 后缀。',
+    saveFailed: '保存失败:{err}',
+    deckGone: '卡组文件不见了(已移动或删除)',
+    deckBrokenSkip: '这组 frontmatter 的 fsrs 行已损坏,为保护复习进度跳过写入(修复后再复习)',
+    progressSaveFailed: '复习进度保存失败:{err}',
+    newDeckAtRoot: '在库根目录新建卡组',
+    newDeckInFolder: '在「{folder}」中新建卡组',
+    newDeckFailed: '新建卡组失败:{err}',
+    noActiveNote: '当前没有打开的笔记(或笔记为空),先打开一篇再生成',
+    genBusyToast: '已有一个建卡任务在进行中',
+    needLogin: '请先登录 Forsion',
+    needEngine: '未连接到 Tangu 引擎',
+    noteClipped: '笔记过长,AI 建卡只使用前 {n} 字(其余部分不参与出卡)',
+    genCreated: '已生成卡组「{name}」({n} 张卡)',
+    errNoFence: '模型没有返回有效的 ```deck 卡组块,请重试',
+    errStart: '起 run 失败 HTTP {code}',
+    errNoRunId: '引擎未返回 runId',
+    errSubscribe: '订阅事件失败 HTTP {code}',
+    errGeneric: '生成失败',
+    errStream: '与引擎的连接中断,未收到完成事件(可重试)',
+    cmdOpen: '记忆闪卡:打开复习台',
+    cmdFromNote: '记忆闪卡:从当前笔记生成卡组',
+    setDailyLimit: '每日新卡上限',
+    setDailyLimitDesc: '每天最多引入多少张新卡进入复习队列(到期复习不受限)',
+    setNudge: '启动时提醒到期复习',
+    setNudgeDesc: '每天最多一次;关掉后只保留状态栏的数字',
+    statusDue: '待复习 {n}',
+    statusClear: '闪卡已清空',
+    statusNoDeck: '闪卡',
+    statusTip: '记忆闪卡 · 到期 {due} + 新卡 {fresh} · 点击打开复习台',
+    nudgeMsg: '今天有 {n} 张卡到期,打开复习台清一清吧',
+    deckActiveBlocked: '这个卡组正开在笔记编辑器里,已跳过这张卡(先关掉它再复习)',
+    achFirstTitle: '初试记忆',
+    achFirstDesc: '完成第一次卡片复习',
+    ach100Title: '百炼成钢',
+    ach100Desc: '累计复习 100 张卡片',
+    achStreakTitle: '七日之约',
+    achStreakDesc: '连续 7 天完成复习',
+    warnNoView: '记忆闪卡需要更新版本的 Forsion 桌面端(缺少工作台视图 API),本次未注册任何界面',
+    warnTaken: '「.deck.md」后缀已被内置文件类型接管,记忆闪卡整体退让,未注册任何入口(请检查插件更新)',
+    warnNoFileType: '当前宿主较旧,不支持 .deck.md 一等文件类型:复习台可用,新建 / AI 建卡入口已隐藏(升级桌面端解锁)',
+  },
+  en: {
+    appName: 'Flashcards',
+    deckFileType: 'Deck',
+    cancel: 'Cancel',
+    ok: 'OK',
+    dismiss: 'Dismiss',
+    refresh: 'Refresh',
+    refreshTip: 'Collect due cards again',
+    open: 'Open',
+    review: 'Review',
+    delete: 'Delete',
+    heroBlurb: 'Break what you learn into cards and beat forgetting with FSRS spaced repetition. A deck is a .deck.md file in your vault, and review progress lives in that file too.',
+    genFromNote: 'Generate deck from note',
+    newDeck: 'New deck',
+    guideHint: 'You can also right-click in the file tree and pick "New deck", or ask Tangu in chat to write a .deck.md for you (the bundled flashcard-format skill taught it the format; open a chat-made deck once in the file tree and it joins the review queue).',
+    guideHintLegacy: 'This host is too old for .deck.md as a first-class file type: the review board still works, but deck creation and AI generation are hidden. Update Forsion Desktop to unlock them.',
+    deckCount: 'Decks: {n}',
+    scopeChip: 'Only: {name} ✕',
+    loading: 'Collecting due cards…',
+    progressToday: 'Today · Reviewed: {n}',
+    progressLeft: ' · Left: {n}',
+    genRunning: 'AI cards · {label} · {pct}%',
+    genFailed: 'AI cards failed: {err}',
+    genBusy: 'working',
+    stageSubmit: 'submitting',
+    stageQueued: 'queued',
+    stageReading: 'reading the note',
+    stageWriting: 'writing cards',
+    stageDone: 'done',
+    idleNoneScoped: 'Nothing due in this deck',
+    idleNone: 'Nothing due right now',
+    idleToday: 'Reviewed today: {n}',
+    idleHeld: ' · Held by the daily limit ({lim}) · New cards waiting: {n}',
+    decksLabel: 'Decks',
+    deckRowCounts: 'Cards: {cards} · Due: {due}',
+    doneTitle: 'All caught up for today!',
+    doneSession: 'This session: {n}',
+    doneToday: 'Today: {n}',
+    doneStreak: 'Streak: {n} days',
+    doneAgain: 'Check for due cards again',
+    cardMeta: '{deck} · {kind} · {i} / {n}',
+    emptyQ: '(no question)',
+    emptyA: '(no answer)',
+    showAnswer: 'Show answer',
+    kbdFlip: 'Space / Enter to flip',
+    kbdRate: 'Rate with 1-4 · 1 Again · 2 Hard · 3 Good · 4 Easy',
+    rate1: 'Again',
+    rate2: 'Hard',
+    rate3: 'Good',
+    rate4: 'Easy',
+    stateNew: 'New',
+    stateLearning: 'Learning',
+    stateRelearning: 'Relearning',
+    stateDue: 'Due',
+    stateIn: 'in {d}',
+    deltaMin: '{n} min',
+    deltaHour: '{n} h',
+    deltaDay: '{n} d',
+    deckNamePh: 'Deck name',
+    addCard: 'Add card',
+    reviewThisDeck: 'Review this deck',
+    editorStats: 'Cards: {n} · Due: {due} · New: {fresh}',
+    editorStatsBroken: ' · fsrs line is corrupted (kept verbatim, reviews paused)',
+    editorEmpty: 'No cards in this deck yet. Hit "Add card" at the top right to write the first one, or open a note and run "Flashcards: Generate deck from note" to let the AI draft them.',
+    qLabel: 'Question',
+    aLabel: 'Answer',
+    qPh: 'Multi-line markdown is fine',
+    aPh: 'Keep the answer short',
+    deckMissing: 'Cannot read this deck file. It may have been moved or deleted.',
+    deckInvalid: 'This file is not in .deck.md deck format (no frontmatter, no <!-- card:cN --> markers). Editing and autosave are switched off so nothing gets overwritten. Add the format by hand, or rename it back to a plain .md file.',
+    saveFailed: 'Save failed: {err}',
+    deckGone: 'The deck file is gone (moved or deleted)',
+    deckBrokenSkip: 'The fsrs line in this deck frontmatter is corrupted. The write was skipped to protect review progress. Fix the line, then review.',
+    progressSaveFailed: 'Could not save review progress: {err}',
+    newDeckAtRoot: 'New deck in the vault root',
+    newDeckInFolder: 'New deck in "{folder}"',
+    newDeckFailed: 'Could not create the deck: {err}',
+    noActiveNote: 'No note is open (or it is empty). Open one first, then generate.',
+    genBusyToast: 'A deck is already being generated',
+    needLogin: 'Sign in to Forsion first',
+    needEngine: 'Not connected to the Tangu engine',
+    noteClipped: 'This note is long, so only the first {n} characters are used to make cards',
+    genCreated: 'Deck "{name}" created · Cards: {n}',
+    errNoFence: 'The model did not return a valid ```deck block. Try again.',
+    errStart: 'Could not start the run (HTTP {code})',
+    errNoRunId: 'The engine returned no runId',
+    errSubscribe: 'Could not subscribe to run events (HTTP {code})',
+    errGeneric: 'Generation failed',
+    errStream: 'Lost the connection to the engine before it finished. You can retry.',
+    cmdOpen: 'Flashcards: Open review board',
+    cmdFromNote: 'Flashcards: Generate deck from note',
+    setDailyLimit: 'Daily new-card limit',
+    setDailyLimitDesc: 'How many new cards may enter the review queue each day (due reviews are never capped)',
+    setNudge: 'Remind me when cards are due',
+    setNudgeDesc: 'At most once a day; turn it off to keep only the status bar count',
+    statusDue: 'Due {n}',
+    statusClear: 'Flashcards clear',
+    statusNoDeck: 'Flashcards',
+    statusTip: 'Flashcards · {due} due + {fresh} new · click to open the review board',
+    nudgeMsg: '{n} card(s) due today — open the review board',
+    deckActiveBlocked: 'This deck is open in the note editor — card skipped. Close it, then review.',
+    achFirstTitle: 'First rep',
+    achFirstDesc: 'Review your first card',
+    ach100Title: 'Hundred reps',
+    ach100Desc: 'Review 100 cards in total',
+    achStreakTitle: 'Seven in a row',
+    achStreakDesc: 'Review on 7 consecutive days',
+    warnNoView: 'Flashcards needs a newer Forsion Desktop (the workbench view API is missing), so no interface was registered',
+    warnTaken: 'A built-in file type already owns ".deck.md", so Flashcards stood down and registered nothing (check for a plugin update)',
+    warnNoFileType: 'This host is older and does not support .deck.md as a first-class file type: the review board works, but deck creation and AI generation are hidden (update the desktop app to unlock)',
+  },
+}
+/** 当前语言(旧宿主缺席 → 中文 canonical);未知值一律当中文。 */
+const L = () => { try { return ctx.getLocale && ctx.getLocale() === 'en' ? 'en' : 'zh' } catch { return 'zh' } }
+/**
+ * 取串:缺键回退中文,再缺回退键名;占位符一律 {name} 形式(英文语序与中文不同,禁模板串拼)。
+ * 替换必须**单趟**:逐键 split/join 会让先替进去的用户数据被后面的轮次再扫一遍 ——
+ * 卡组名叫 `{n}` 时 `已生成卡组「{n}」({n} 张卡)` 会被吃成 `已生成卡组「5」(5 张卡)`。
+ * 没给值的占位符原样留着(不许替成 "undefined")。
+ */
+const t = (k, vars) => {
+  const d = MSG[L()] || MSG.zh
+  const s = d[k] != null ? d[k] : (MSG.zh[k] != null ? MSG.zh[k] : k)
+  return vars ? s.replace(/\{(\w+)\}/g, (m, n) => (n in vars ? String(vars[n]) : m)) : s
+}
+/**
+ * 落盘兜底卡组名 —— **数据契约,永不随界面语言变**。走 t() 的话,同一个「模型没给名字」
+ * 在 en 下会落成 `Untitled deck.deck.md`、zh 下落成 `未命名卡组.deck.md`,切语言就像换了个数据目录
+ * (README / CHANGELOG 承诺过卡组文件路径不随语言变)。与 folderRoot() 兜底 '记忆闪卡' 同口径取中文
+ * canonical;故意不放进 MSG —— 它不是 UI 文案,是写进用户笔记库的文件名。
+ */
+const UNTITLED_DECK = '未命名卡组'
+
 function sanitizeFileName(name) {
-  return String(name || '').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || '未命名卡组'
+  return String(name || '').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || UNTITLED_DECK
 }
 const basename = (p) => String(p || '').split('/').pop().replace(/\.deck\.md$/i, '')
 function safeHref(u) {
@@ -376,26 +627,29 @@ async function getCfg() {
   try { return { backendUrl: location.origin + '/api', token: localStorage.getItem('forsion_token') || '', modelId: '' } } catch { /* ignore */ }
   return { backendUrl: '', token: '', modelId: '' }
 }
-/** 引擎事件 → 进度(status/token 都是真事件;生成阶段按已产出字数往 92% 爬,只保证单调)。 */
+/**
+ * 引擎事件 → 进度(status/token 都是真事件;生成阶段按已产出字数往 92% 爬,只保证单调)。
+ * 给的是**词表键**不是成品串:进度条会在语言切换后重绘,存成品串就成了半英半中。
+ */
 function stageOf(ev, content) {
   const p = ev.payload || {}
-  if (ev.type === 'status') return p.state === 'queued' ? { pct: 10, label: '排队中' } : p.state === 'running' ? { pct: 16, label: '模型阅读笔记中' } : null
-  if (ev.type === 'token') return { pct: Math.min(92, 30 + content.length / 60), label: '生成卡片中' }
+  if (ev.type === 'status') return p.state === 'queued' ? { pct: 10, key: 'stageQueued' } : p.state === 'running' ? { pct: 16, key: 'stageReading' } : null
+  if (ev.type === 'token') return { pct: Math.min(92, 30 + content.length / 60), key: 'stageWriting' }
   return null
 }
 async function runAgent(cfg, sessionId, message, onTick, signal, onStage) {
-  const stage = (pct, label) => { if (onStage) onStage(pct, label) }
-  stage(6, '提交任务')
+  const stage = (pct, key) => { if (onStage) onStage(pct, key) }
+  stage(6, 'stageSubmit')
   const h = { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.token}` }
   const start = await fetch(`${cfg.backendUrl}/agent/runs`, {
     method: 'POST', headers: h, signal,
     body: JSON.stringify({ session_id: sessionId, model_id: cfg.modelId || undefined, app_id: APP_ID, message, attachments: [] }),
   })
-  if (!start.ok) throw new Error((await start.text().catch(() => '')) || `起 run 失败 HTTP ${start.status}`)
+  if (!start.ok) throw new Error((await start.text().catch(() => '')) || t('errStart', { code: start.status }))
   const { runId } = await start.json()
-  if (!runId) throw new Error('引擎未返回 runId')
+  if (!runId) throw new Error(t('errNoRunId'))
   const res = await fetch(`${cfg.backendUrl}/agent/runs/${encodeURIComponent(runId)}/events?fromSeq=0`, { headers: h, signal })
-  if (!res.ok || !res.body) throw new Error(`订阅事件失败 HTTP ${res.status}`)
+  if (!res.ok || !res.body) throw new Error(t('errSubscribe', { code: res.status }))
   const reader = res.body.getReader()
   const dec = new TextDecoder()
   let buf = ''
@@ -417,13 +671,13 @@ async function runAgent(cfg, sessionId, message, onTick, signal, onStage) {
       if (typeof ev.seq === 'number') { if (ev.seq <= lastSeq) continue; lastSeq = ev.seq }
       if (ev.type === 'token') { const dta = ev.payload && ev.payload.delta; if (dta) { content += dta; if (onTick) onTick(content) } }
       const st = stageOf(ev, content)
-      if (st) stage(st.pct, st.label)
+      if (st) stage(st.pct, st.key)
       if (ev.type === 'token') continue
-      if (ev.type === 'done') { stage(100, '完成'); return (ev.payload && ev.payload.content) || content }
-      if (ev.type === 'error') throw new Error((ev.payload && ev.payload.error) || '生成失败')
+      if (ev.type === 'done') { stage(100, 'stageDone'); return (ev.payload && ev.payload.content) || content }
+      if (ev.type === 'error') throw new Error((ev.payload && ev.payload.error) || t('errGeneric'))
     }
   }
-  throw new Error('与引擎的连接中断,未收到完成事件(可重试)')
+  throw new Error(t('errStream'))
 }
 
 // 超长笔记只取前 NOTE_CAP 字喂模型 —— 但必须提示用户,不许静默截(否则像模型漏读)。
@@ -460,14 +714,27 @@ ${note}`
 // ── 卡组落盘:工作文件夹 + 索引自愈 ───────────────────────────────────────────
 const folderRoot = () => (ctx.app.workFolder ? ctx.app.workFolder() : '记忆闪卡')
 const indexPath = () => `${folderRoot()}/.deck-index.json`
+/** 三态:`ok:true` = 读到了(空索引也算);`ok:false` = 读失败 / 坏 JSON。
+ *  ⚠️ 折叠成「还没有索引」再无条件 writeIndex,等于把「读不出来」持久化成「这些卡组不存在」——
+ *     其余卡组从复习队列与状态栏里消失,而 1.2.0 新增的 5 分钟轮询会**无人值守**地触发这条路。 */
 async function readIndex() {
+  let t = null
+  try { t = await ctx.app.readFile(indexPath()) } catch { return { decks: [], ok: false } }
+  // ⚠️ 已知残余:`.deck-index.json` 是**点文件**,`collectFiles` 明确跳过点开头
+  //    (vaultManager.ts:81)→ 只读枚举面看不到它,「还没建过索引」与「这一刻读不出来」
+  //    在当前宿主 API 下**分不开**。试过拿「本会话见过几行」当判据,但切库时索引本来就该是空的,
+  //    那条启发式会把切库判成读失败、从此不再写索引 —— 比原病更坏,已回退。
+  //    真正的下游损失由 buildQueue 那条闸兜住(卡组行只在**枚举面确认文件不在了**时才剔),
+  //    索引本身被削一次的代价是「其余卡组要等下次打开才回到队列」,不丢文件、不丢进度。
+  if (t == null) return { decks: [], ok: true }
   try {
-    const t = await ctx.app.readFile(indexPath())
-    const j = t ? JSON.parse(t) : null
-    return j && Array.isArray(j.decks) ? { decks: j.decks } : { decks: [] }
-  } catch { return { decks: [] } }
+    const j = JSON.parse(t)
+    return j && Array.isArray(j.decks) ? { decks: j.decks, ok: true } : { decks: [], ok: false }
+  } catch { return { decks: [], ok: false } } // 写了半截的坏 JSON:绝不当成「没有卡组」
 }
-const writeIndex = (idx) => ctx.app.writeFile(indexPath(), JSON.stringify(idx, null, 2))
+const writeIndex = (idx) => (idx && idx.ok === false
+  ? Promise.resolve() // 读失败态 / 这一轮有读不到的行 —— 一律不落盘
+  : ctx.app.writeFile(indexPath(), JSON.stringify({ decks: (idx && idx.decks) || [] }, null, 2)))
 /** 索引自愈:刷新一行(parsed 可省,省了就现读);文件读不到 = 孤儿行,剔除。 */
 async function refreshDeckRow(path, parsed) {
   const idx = await readIndex()
@@ -479,14 +746,14 @@ async function refreshDeckRow(path, parsed) {
   const rows = idx.decks.filter((r) => r && r.path && r.path !== path)
   if (deck) {
     const now = Date.now()
-    let due = 0
-    for (const c of deck.cards) {
-      const st = deck.fsrs[c.id]
-      if (st) { const t = Date.parse(st.due || ''); if (Number.isFinite(t) && t <= now) due++ }
-    }
-    rows.unshift({ path, name: deck.name || basename(path), cards: deck.cards.length, due, touched: now })
+    // 口径单源:到期/新卡的判据必须与 buildQueue 的入队判据逐字一致(deckCounts),否则
+    // 索引记 1、队列收 0 —— 状态栏就会「说 3 张、点进去 0 张」(1.2.0 修)。
+    const cnt = deckCounts(deck, now)
+    rows.unshift({ path, name: deck.name || basename(path), cards: deck.cards.length, due: cnt.due, fresh: cnt.fresh, nextDue: cnt.nextDue, touched: now })
   }
-  await writeIndex({ decks: rows })
+  // 索引读失败时只更新内存与状态栏,**不落盘** —— 落盘就把「读不出来」变成「其余卡组不存在」。
+  if (idx.ok) await writeIndex({ decks: rows })
+  paintStatus(rows)
   return rows
 }
 /**
@@ -497,8 +764,23 @@ async function uniqueDeckPath(name, folder) {
   const base = sanitizeFileName(name)
   const root = folder == null ? folderRoot() : String(folder).replace(/\/+$/, '')
   const prefix = root ? `${root}/` : ''
+  // ⚠️ 占位判定**绝不能**用 readFile 的 null:宿主对「文件不存在」「fs 读失败(EACCES/EIO/
+  //    云盘掉线)」「库根未就位」一律返回 null(真源 electron/amadeus/ipc.ts:981-988)。
+  //    把读失败当空位 → 下一行 writeFile 整篇盖掉用户既有卡组 = 卡片与全部 FSRS 进度当场消失。
+  //    所以改用两个**不受单次读失败影响**的存在性证据:宿主只读枚举面 + 我们自己的索引账本。
+  let taken = {}
+  try {
+    const files = ctx.app.listFiles ? await ctx.app.listFiles() : null
+    for (const f of files || []) taken[f] = true
+  } catch { /* 枚举面缺席/抛错:退到索引账本 */ }
+  try {
+    for (const r of (await readIndex()).decks) if (r && r.path) taken[r.path] = true
+  } catch { /* ignore */ }
   for (let n = 1; n < 100; n++) {
     const p = `${prefix}${base}${n > 1 ? ` ${n}` : ''}.deck.md`
+    if (taken[p]) continue
+    // 枚举面与账本都说这个路径空着,再用 readFile 复核一次:读到内容 = 确实被占(枚举有洞时的兜底)。
+    // 反过来 readFile 给 null 已经不能单独作数了 —— 上面两条证据才是判据。
     const t = await ctx.app.readFile(p)
     if (t == null) return p
   }
@@ -514,14 +796,25 @@ async function buildQueue(scope) {
   const fresh = []
   const rows = []
   const now = Date.now()
+  // ⚠️ 「孤儿行」只能靠**存在性**判,不能靠 readFile 给不给内容:1.2.0 起 5 分钟轮询会**无人值守**
+  //    地跑这条路,某个卡组正文这一刻读不到(云盘占位 / 权限 / 切库瞬间)就会被永久剔除并落盘 ——
+  //    文件还在盘上,却从复习队列与状态栏里消失了。拿只读枚举面复核:`.deck.md` 非点文件,枚举得到。
+  let listed = null
+  try { if (ctx.app.listFiles) listed = new Set(await ctx.app.listFiles()) } catch { listed = null }
+  let skipped = 0 // 这一轮有几行是「读不到但没被证明消失」——有就不许落盘(那份 rows 是残的)
   for (const row of idx.decks) {
     if (!row || !row.path) continue
     const t = await ctx.app.readFile(row.path)
-    if (t == null) continue // 孤儿行剔除
+    if (t == null) {
+      // 枚举面明确说它不在了 → 真孤儿,剔除;否则(还在 / 判不了)一律**保留原行**
+      if (listed && listed.size && !listed.has(row.path)) continue
+      rows.push(row)
+      skipped++
+      continue
+    }
     const deck = parseDeck(t)
     const name = deck.name || basename(row.path)
     const inScope = !scope || !scope.path || row.path === scope.path
-    let dueN = 0
     // fsrs 行损坏的卡组不进队列:此时 fsrs 是空对象,若照常入队,评分写盘会把全组当新卡
     // 重建调度 —— 修好 frontmatter 前只展示,不复习(毁档防线)。
     const usable = !deck.fsrsBroken
@@ -530,19 +823,147 @@ async function buildQueue(scope) {
       if (st) {
         const dts = Date.parse(st.due || '')
         if (Number.isFinite(dts) && dts <= now) {
-          dueN++
           if (usable && inScope && c.q) due.push({ path: row.path, deckName: name, id: c.id, q: c.q, a: c.a, prev: st, dueTs: dts })
         }
       } else if (usable && inScope && c.q) {
         fresh.push({ path: row.path, deckName: name, id: c.id, q: c.q, a: c.a, prev: null, dueTs: Infinity })
       }
     }
-    rows.push({ path: row.path, name, cards: deck.cards.length, due: dueN, touched: row.touched || now })
+    // 行计数走 deckCounts(与上面的入队判据同源;scope 只影响队列,不影响索引里的全库计数)
+    const cnt = deckCounts(deck, now)
+    rows.push({ path: row.path, name, cards: deck.cards.length, due: cnt.due, fresh: cnt.fresh, nextDue: cnt.nextDue, touched: row.touched || now })
   }
-  await writeIndex({ decks: rows })
+  // 索引读失败、或这一轮有读不到的卡组 → 只更新内存与状态栏,**不落盘**(落了就把「读不出来」写死)
+  await writeIndex({ decks: rows, ok: idx.ok && skipped === 0 })
+  paintStatus(rows)
   due.sort((x, y) => x.dueTs - y.dueTs)
   const allow = Math.max(0, dailyLimit() - readDaily().introduced)
   return { items: due.concat(fresh.slice(0, allow)), decks: rows.length, freshSkipped: Math.max(0, fresh.length - allow), rows }
+}
+
+// ── 状态栏「今日待复习」(1.2.0):计数纯函数 + 常驻项运行时 ────────────────────
+// 计数必须便宜:平时只读 .deck-index.json 这一个小 JSON;全量扫盘(逐个 readFile 卡组正文)
+// 只发生在①启动第一次(v1 老索引缺 fresh/nextDue → 强制自愈)②某张卡真的跨过到期时刻
+// ③用户自己打开复习台。轮询自身封在 STATUS_POLL,且一律 setTimeout 自排程(禁 setInterval)。
+
+/**
+ * 单个卡组的计数 —— **口径真源**。判据逐字对齐 buildQueue 的入队条件:
+ * 坏 fsrs 行的卡组一张都不算(它一张都进不了队列),空问题的卡不算(同上),
+ * fsrs 里的孤儿键(卡已删)不算(只遍历 cards)。
+ * nextDue = 未来最近的一个到期时刻;没有则 0(0 = 「没有下一个时刻」,不是「立刻过期」)。
+ */
+function deckCounts(deck, now) {
+  const out = { due: 0, fresh: 0, nextDue: 0 }
+  if (!deck || !Array.isArray(deck.cards) || deck.fsrsBroken) return out
+  const fsrs = deck.fsrs || {}
+  for (const c of deck.cards) {
+    if (!c || !c.q) continue
+    const st = fsrs[c.id]
+    if (!st) { out.fresh += 1; continue }
+    const dts = Date.parse(st.due || '')
+    if (!Number.isFinite(dts)) continue
+    if (dts <= now) out.due += 1
+    else if (out.nextDue === 0 || dts < out.nextDue) out.nextDue = dts
+  }
+  return out
+}
+/**
+ * 索引行 → 今日待复习总数。新卡受每日上限压(与 buildQueue 的 allow 同式),
+ * 于是 n 恒等于复习台队列长度(check.mjs R1 把这条钉成不变式)。
+ * 缺字段的 v1 老行按 0 计(不猜);负数 / 非数 / 空行一律钳到 0。
+ */
+function dueSummary(rows, daily, limit) {
+  let due = 0
+  let fresh = 0
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (!r) continue
+    due += Math.max(0, num(r.due, 0))
+    fresh += Math.max(0, num(r.fresh, 0))
+  }
+  const allow = Math.max(0, num(limit, 0) - Math.max(0, num(daily && daily.introduced, 0)))
+  fresh = Math.min(fresh, allow)
+  return { due, fresh, n: due + fresh }
+}
+/** 索引是否需要一次全量重扫:v1 老行(缺 fresh/nextDue)→ 自愈一次;有卡真的到点了 → 重算。 */
+function isIndexStale(rows, now) {
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (!r) continue
+    if (r.fresh == null || r.nextDue == null) return true
+    const nd = num(r.nextDue, 0)
+    if (nd > 0 && nd <= now) return true
+  }
+  return false
+}
+/** 提醒判据(纯):五条全过才提醒 —— 开着 / 真有到期卡 / 本会话没提过 / 今天没提过。 */
+function shouldNudge(lastKey, todayKey, enabled, n, sessionDone) {
+  if (!enabled || sessionDone) return false
+  if (!(num(n, 0) > 0)) return false
+  return String(lastKey == null ? '' : lastKey) !== String(todayKey)
+}
+
+const STATUS_POLL = 5 * MIN // 轮询下限:≥5 分钟,且只有 isIndexStale 才会真的扫盘
+const nudgeOn = () => lsGet('nudge', 'true') !== 'false' // 关掉只关通知,状态栏数字照旧
+let statusHandle = null
+let statusPollTimer = null
+let offStatusLocale = null
+let statusDisposed = false
+let nudgedSession = false
+let statusLast = { n: 0, due: 0, fresh: 0, decks: 0 }
+
+/** 索引行 → 状态栏。复习/建卡后调用方本来就握着 rows,零额外读盘。 */
+function paintStatus(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const s = dueSummary(list, readDaily(), dailyLimit())
+  statusLast = { n: s.n, due: s.due, fresh: s.fresh, decks: list.length }
+  paintStatusText()
+}
+/**
+ * 只读 statusLast + 词表 → handle.update():**原位**更新,永不重注册(重注册会让宿主的
+ * 显示/排序设置错位)。三态都不藏起来 —— 状态项消失比数字不准更让人以为插件坏了;
+ * 而「中性态」是必需的:readIndex 把读失败折叠成 {decks:[]},没有中性态就只能谎报「已清空」。
+ * text/title 只由数字 + 词表串构成,绝不拼用户的卡组名(它渲染在宿主状态栏,不过我们的渲染器)。
+ */
+function paintStatusText() {
+  if (!statusHandle) return
+  const s = statusLast
+  const text = s.decks === 0 ? t('statusNoDeck') : (s.n > 0 ? t('statusDue', { n: s.n }) : t('statusClear'))
+  try { statusHandle.update({ text, title: t('statusTip', { due: s.due, fresh: s.fresh }) }) } catch { /* 宿主收走了这枚项 */ }
+}
+async function refreshStatus() {
+  if (statusDisposed || !statusHandle) return
+  try {
+    const idx = await readIndex()
+    if (statusDisposed) return
+    if (isIndexStale(idx.decks, Date.now())) await buildQueue(null) // 内部会 paintStatus
+    else paintStatus(idx.decks)
+  } catch { /* 读不到就保持上次显示,不谎报 */ }
+  if (statusDisposed) return
+  await maybeNudge(statusLast.n)
+  if (statusDisposed) return
+  schedulePoll()
+}
+function schedulePoll() {
+  if (statusDisposed || !statusHandle) return
+  if (statusPollTimer) { clearTimeout(statusPollTimer); statusPollTimer = null }
+  statusPollTimer = setTimeout(() => { statusPollTimer = null; refreshStatus().catch(() => { }) }, STATUS_POLL)
+}
+/**
+ * 启动提醒:一天最多一次,记在插件自己的 JSON blob 里(按本地日期判)。
+ * P0#1 读失败 ≠ 没提醒过 —— 本会话闭嘴,**且绝不写回**(写回会盖掉那份读不出来的 blob)。
+ * P0#3 持久标记只在通知真的发出去之后才落;写失败最多让下次启动多提醒一次(可重来,不丢数据)。
+ * 没有 loadData/saveData 的宿主 = 兑现不了「一天最多一次」→ 一次都不提醒(不许留下做不到的承诺)。
+ */
+async function maybeNudge(n) {
+  if (nudgedSession || statusDisposed || !statusHandle) return
+  if (typeof ctx.loadData !== 'function' || typeof ctx.saveData !== 'function') return
+  let data
+  try { data = await ctx.loadData() } catch { nudgedSession = true; return }
+  if (statusDisposed || nudgedSession) return
+  const today = dayKey(Date.now())
+  if (!shouldNudge(data && data.lastNudgeDate, today, nudgeOn(), n, false)) return
+  nudgedSession = true // 先占后发:挡住并发轮询重入
+  say(t('nudgeMsg', { n }), { level: 'info' })
+  try { await ctx.saveData(Object.assign({}, data || {}, { lastNudgeDate: today })) } catch { /* 下次启动重来 */ }
 }
 
 // ── 跨视图小总线 + 待办打开请求 ──────────────────────────────────────────────
@@ -551,36 +972,36 @@ let pendingReview = null // { path, name } — 编辑视图「复习本组」→
 let ftReady = false // 一等文件类型是否就位(旧宿主缺席 → 复习台照常,建卡入口隐藏)
 
 // ── AI 建卡(模块级:切走视图任务照跑;复习台顶部显示进度,可取消) ────────────
-const gen = { active: false, pct: 0, label: '', error: '', controller: null }
+const gen = { active: false, pct: 0, stage: '', error: '', controller: null }
 function genSet(patch) { Object.assign(gen, patch); bus.emit({ type: 'gen' }) }
 async function generateFromNote() {
   const note = ctx.app.getActivePageText ? String(ctx.app.getActivePageText() || '') : ''
-  if (!note.trim()) { say('当前没有打开的笔记(或笔记为空),先打开一篇再生成', { level: 'warning' }); return }
-  if (gen.active) { say('已有一个建卡任务在进行中', { level: 'warning' }); if (ctx.openView) ctx.openView('review'); return }
+  if (!note.trim()) { say(t('noActiveNote'), { level: 'warning' }); return }
+  if (gen.active) { say(t('genBusyToast'), { level: 'warning' }); if (ctx.openView) ctx.openView('review'); return }
   const cfg = await getCfg()
-  if (!cfg.backendUrl || !cfg.token) { say(cfg.backendUrl ? '请先登录 Forsion' : '未连接到 Tangu 引擎', { level: 'error' }); return }
+  if (!cfg.backendUrl || !cfg.token) { say(cfg.backendUrl ? t('needLogin') : t('needEngine'), { level: 'error' }); return }
   if (ctx.openView) ctx.openView('review')
   const clip = clipNote(note)
-  if (clip.truncated) say(`笔记过长,AI 建卡只使用前 ${NOTE_CAP} 字(其余部分不参与出卡)`, { level: 'warning' })
+  if (clip.truncated) say(t('noteClipped', { n: NOTE_CAP }), { level: 'warning' })
   const controller = new AbortController()
-  genSet({ active: true, pct: 6, label: '提交任务', error: '', controller })
+  genSet({ active: true, pct: 6, stage: 'stageSubmit', error: '', controller })
   try {
-    const out = await runAgent(cfg, uuid(), GEN_PROMPT(clip.text), null, controller.signal, (pct, label) => genSet({ pct: Math.max(gen.pct, pct), label }))
+    const out = await runAgent(cfg, uuid(), GEN_PROMPT(clip.text), null, controller.signal, (pct, key) => genSet({ pct: Math.max(gen.pct, pct), stage: key }))
     const fence = parseDeckFence(out)
-    if (!fence) throw new Error('模型没有返回有效的 ```deck 卡组块,请重试')
-    const deck = { name: fence.name || '未命名卡组', fsrs: {}, cards: [] }
+    if (!fence) throw new Error(t('errNoFence'))
+    const deck = { name: fence.name || UNTITLED_DECK, fsrs: {}, cards: [] }
     for (const c of fence.cards) deck.cards.push({ id: nextCardId(deck), q: c.q, a: c.a })
     const path = await uniqueDeckPath(deck.name)
     await ctx.app.writeFile(path, serializeDeck(deck))
     await refreshDeckRow(path, deck)
-    genSet({ active: false, pct: 100, label: '完成', controller: null })
+    genSet({ active: false, pct: 100, stage: 'stageDone', controller: null })
     bus.emit({ type: 'decks' })
-    say(`已生成卡组「${deck.name}」(${deck.cards.length} 张卡)`, { level: 'success' })
+    say(t('genCreated', { name: deck.name, n: deck.cards.length }), { level: 'success' })
     if (ctx.app.openFile) ctx.app.openFile(path)
   } catch (e) {
     const aborted = controller.signal.aborted
-    genSet({ active: false, pct: 0, label: '', error: aborted ? '' : (e && e.message) || String(e), controller: null })
-    if (!aborted) say(`AI 建卡失败:${gen.error}`, { level: 'error' })
+    genSet({ active: false, pct: 0, stage: '', error: aborted ? '' : (e && e.message) || String(e), controller: null })
+    if (!aborted) say(t('genFailed', { err: gen.error }), { level: 'error' })
   }
 }
 
@@ -689,9 +1110,9 @@ function askName(title, def) {
     const row = document.createElement('div')
     row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:10px'
     const no = document.createElement('button')
-    no.textContent = '取消'
+    no.textContent = t('cancel')
     const ok = document.createElement('button')
-    ok.textContent = '确定'
+    ok.textContent = t('ok')
     for (const b of [no, ok]) b.style.cssText = 'padding:5px 12px;font:inherit;border-radius:9px;border:1px solid var(--fc-border,rgba(0,0,0,.2));background:transparent;color:inherit;cursor:pointer'
     const done = (v) => { ov.remove(); resolve(v) }
     ok.addEventListener('click', () => done(inp.value.trim() || null))
@@ -774,19 +1195,20 @@ const STYLE = `
 // ── 展示辅助 ─────────────────────────────────────────────────────────────────
 function fmtDelta(ms) {
   const v = Math.max(0, Number(ms) || 0)
-  if (v < 90 * MIN) return `${Math.max(1, Math.round(v / MIN))} 分钟`
-  if (v < 0.75 * DAY) return `${Math.round(v / 3600000)} 小时`
-  return `${Math.max(1, Math.round(v / DAY))} 天`
+  if (v < 90 * MIN) return t('deltaMin', { n: Math.max(1, Math.round(v / MIN)) })
+  if (v < 0.75 * DAY) return t('deltaHour', { n: Math.round(v / 3600000) })
+  return t('deltaDay', { n: Math.max(1, Math.round(v / DAY)) })
 }
 function stateLabel(st, now) {
-  if (!st) return { text: '新卡', cls: 'new' }
-  if (st.state === 1) return { text: '学习中', cls: 'learn' }
-  if (st.state === 3) return { text: '重学中', cls: 'learn' }
-  const t = Date.parse(st.due || '')
-  if (!Number.isFinite(t) || t <= now) return { text: '到期', cls: 'due' }
-  return { text: `${fmtDelta(t - now)}后`, cls: 'ok' }
+  if (!st) return { text: t('stateNew'), cls: 'new' }
+  if (st.state === 1) return { text: t('stateLearning'), cls: 'learn' }
+  if (st.state === 3) return { text: t('stateRelearning'), cls: 'learn' }
+  const dts = Date.parse(st.due || '')
+  if (!Number.isFinite(dts) || dts <= now) return { text: t('stateDue'), cls: 'due' }
+  return { text: t('stateIn', { d: fmtDelta(dts - now) }), cls: 'ok' }
 }
-const RATE_KEYS = [[1, '重来'], [2, '困难'], [3, '记得'], [4, '简单']]
+/** 评分四档(Anki 词表:Again / Hard / Good / Easy);每次取,语言切换后跟着变。 */
+const rateKeys = () => [[1, t('rate1')], [2, t('rate2')], [3, t('rate3')], [4, t('rate4')]]
 
 // ══ 复习台视图(跨卡组到期队列) ══════════════════════════════════════════════
 function mountReview(el) {
@@ -845,27 +1267,48 @@ function mountReview(el) {
     try {
       const it = items[pos]
       if (!it) return
+      // 活动页写保护:降级宿主(没有 registerFileType)下 .deck.md 就是一篇普通笔记,可能正开在
+      // 笔记编辑器里 —— writeFile 是整文件覆写,会把用户这 800ms 内敲的字连同 fsrs 行一起抹掉。
+      // 拒写 + 提示 + 跳过这张卡(不写盘、不计数、不发成就,仍留在到期队列里下次再来)。
+      // 闸**只**限 !ftReady:单活页模型下现代宿主打开卡组编辑器就会把该路径报成活动页,
+      // 无条件闸会把「编辑器开着 → 复习本组」这条既有主流程整个打死(ftReady 时行为零变化)。
+      if (!ftReady && ctx.app.getActivePage && ctx.app.getActivePage() === it.path) {
+        say(t('deckActiveBlocked'), { level: 'warning' })
+        pos += 1
+        flipped = false
+        if (pos >= items.length) { phase = 'done'; flushActivity() }
+        render()
+        return
+      }
       const now = Date.now()
       const st = schedule(it.prev, g, now)
+      let saved = false
       try {
-        const t = await ctx.app.readFile(it.path)
-        if (t == null) throw new Error('卡组文件不见了(已移动或删除)')
-        const deck = parseDeck(t)
-        if (deck.fsrsBroken) throw new Error('这组 frontmatter 的 fsrs 行已损坏,为保护复习进度跳过写入(修复后再复习)')
+        const text = await ctx.app.readFile(it.path)
+        if (text == null) throw new Error(t('deckGone'))
+        const deck = parseDeck(text)
+        if (deck.fsrsBroken) throw new Error(t('deckBrokenSkip'))
         deck.fsrs[it.id] = st
         await ctx.app.writeFile(it.path, serializeDeck(deck))
+        saved = true
         refreshDeckRow(it.path, deck).catch(() => { /* 索引下次自愈 */ })
       } catch (e) {
-        say(`复习进度保存失败:${(e && e.message) || e}`, { level: 'error' })
+        say(t('progressSaveFailed', { err: (e && e.message) || e }), { level: 'error' })
       }
-      const daily = readDaily()
-      daily.reviewed += 1
-      if (!it.prev) daily.introduced += 1
-      writeDaily(daily)
-      sessionReviewed += 1
-      unlogged += 1
-      if (ctx.achievements && ctx.achievements.track) ctx.achievements.track('review')
-      updateStreak()
+      // ⚠️ 进度没落盘就一个持久标记都不许落(P0 模板 3)。以前失败照样 daily.reviewed++ /
+      //    daily.introduced++(每日新卡额度被白吃一格,当天少学一张)/ 成就 +1 / 连击开始 ——
+      //    进度零落盘却对外宣称「今日已复习 1 张」。口径与 1.2.0 新加的 deckActiveBlocked 闸对齐:
+      //    跳过这张卡、不计数、不发成就,下一轮还能重来。
+      if (saved) {
+        const daily = readDaily()
+        daily.reviewed += 1
+        if (!it.prev) daily.introduced += 1
+        writeDaily(daily)
+        sessionReviewed += 1
+        unlogged += 1
+        if (ctx.achievements && ctx.achievements.track) ctx.achievements.track('review')
+        updateStreak()
+      }
       if (Date.parse(st.due) - now < 20 * MIN) items.push({ ...it, prev: st, dueTs: Date.parse(st.due) }) // 学习步:本节内重现
       pos += 1
       flipped = false
@@ -878,13 +1321,14 @@ function mountReview(el) {
     // 在 innerHTML 重置(会把焦点炸到 body)之前判定归属:分屏下编辑器自动保存触发的
     // 重绘绝不许每 600ms 抢走用户输入焦点 —— 只有显式要求(挂载/复习本组)或本来就持有才聚焦。
     const wantFocus = !!(opts && opts.focus) || ownsFocus()
+    // innerHTML 只放编译期字面量骨架:一切文案(含词表串与用户卡组名)一律 textContent 落。
     root.innerHTML = `
 <div class="fc-hdr">
-  <span style="font-weight:600">记忆闪卡</span>
+  <span style="font-weight:600" data-title></span>
   <span class="fc-chip due" data-scope style="display:none;cursor:pointer"></span>
   <span style="flex:1"></span>
   <span class="fc-muted" data-count style="font-size:11px;font-variant-numeric:tabular-nums"></span>
-  <button class="fc-btn ghost sm" data-refresh title="重新收集到期卡片">刷新</button>
+  <button class="fc-btn ghost sm" data-refresh></button>
 </div>
 <div class="fc-body">
   <div data-gen></div>
@@ -894,22 +1338,26 @@ function mountReview(el) {
   </div>
   <div data-main></div>
 </div>`
+    root.querySelector('[data-title]').textContent = t('appName')
     const scopeEl = root.querySelector('[data-scope]')
     if (scope) {
       scopeEl.style.display = ''
-      scopeEl.textContent = `只看:${scope.name || basename(scope.path)} ✕`
+      scopeEl.textContent = t('scopeChip', { name: scope.name || basename(scope.path) })
       scopeEl.addEventListener('click', () => { scope = null; rebuild({ focus: true }) })
     }
     const cnt = root.querySelector('[data-count]')
-    cnt.textContent = phase === 'loading' ? '' : `${meta.decks} 个卡组`
-    root.querySelector('[data-refresh]').addEventListener('click', () => rebuild({ focus: true }))
+    cnt.textContent = phase === 'loading' ? '' : t('deckCount', { n: meta.decks })
+    const refreshBtn = root.querySelector('[data-refresh]')
+    refreshBtn.textContent = t('refresh')
+    refreshBtn.setAttribute('title', t('refreshTip'))
+    refreshBtn.addEventListener('click', () => rebuild({ focus: true }))
     renderGen()
     renderProgress()
     const main = root.querySelector('[data-main]')
     if (phase === 'loading') {
       const d = document.createElement('div')
       d.className = 'fc-empty'
-      d.textContent = '正在收集到期卡片…'
+      d.textContent = t('loading')
       main.appendChild(d)
     } else if (phase === 'guide') renderGuide(main)
     else if (phase === 'idle') renderIdle(main)
@@ -926,7 +1374,7 @@ function mountReview(el) {
     const total = daily.reviewed + remain
     const pct = total ? Math.round((daily.reviewed / total) * 100) : 100
     box.style.display = ''
-    root.querySelector('[data-progtext]').textContent = `今日进度 · 已复习 ${daily.reviewed} 张` + (remain ? ` · 剩余 ${remain} 张` : '')
+    root.querySelector('[data-progtext]').textContent = t('progressToday', { n: daily.reviewed }) + (remain ? t('progressLeft', { n: remain }) : '')
     root.querySelector('[data-progpct]').textContent = `${pct}%`
     root.querySelector('[data-progfill]').style.width = `${pct}%`
   }
@@ -946,10 +1394,10 @@ function mountReview(el) {
       const lab = document.createElement('span')
       lab.className = 'fc-muted'
       lab.style.fontSize = '11.5px'
-      lab.textContent = `AI 建卡:${gen.label || '进行中'} · ${Math.round(gen.pct)}%`
+      lab.textContent = t('genRunning', { label: gen.stage ? t(gen.stage) : t('genBusy'), pct: Math.round(gen.pct) })
       const cancel = document.createElement('button')
       cancel.className = 'fc-btn ghost sm'
-      cancel.textContent = '取消'
+      cancel.textContent = t('cancel')
       cancel.addEventListener('click', () => { if (gen.controller) gen.controller.abort() })
       head.appendChild(lab); head.appendChild(cancel)
       const tr = document.createElement('div')
@@ -966,10 +1414,10 @@ function mountReview(el) {
       row.style.justifyContent = 'space-between'
       const er = document.createElement('span')
       er.style.cssText = 'font-size:11.5px;color:var(--fc-danger)'
-      er.textContent = `AI 建卡失败:${gen.error}`
+      er.textContent = t('genFailed', { err: gen.error })
       const x = document.createElement('button')
       x.className = 'fc-btn ghost sm'
-      x.textContent = '知道了'
+      x.textContent = t('dismiss')
       x.addEventListener('click', () => { gen.error = ''; renderGen() })
       row.appendChild(er); row.appendChild(x)
       p.appendChild(row)
@@ -981,25 +1429,27 @@ function mountReview(el) {
     const hero = document.createElement('div')
     hero.className = 'fc-hero'
     hero.innerHTML = `
-<h1>记忆闪卡</h1>
-<p>把知识拆成卡片,用 FSRS 间隔重复对抗遗忘。卡组是笔记库里的 .deck.md 文件,复习进度也存在文件里。</p>
+<h1 data-h></h1>
+<p data-blurb></p>
 <div class="fc-row" style="justify-content:center" data-acts></div>
 <p class="fc-muted" data-hint style="font-size:11px;margin-top:14px"></p>`
+    hero.querySelector('[data-h]').textContent = t('appName')
+    hero.querySelector('[data-blurb]').textContent = t('heroBlurb')
     const acts = hero.querySelector('[data-acts]')
     const hint = hero.querySelector('[data-hint]')
     if (ftReady) {
       const gen1 = document.createElement('button')
       gen1.className = 'fc-btn primary'
-      gen1.textContent = '从当前笔记生成卡组'
+      gen1.textContent = t('genFromNote')
       gen1.addEventListener('click', () => { generateFromNote() })
       const mk = document.createElement('button')
       mk.className = 'fc-btn'
-      mk.textContent = '新建卡组'
+      mk.textContent = t('newDeck')
       mk.addEventListener('click', () => { createDeckInteractive(null) })
       acts.appendChild(gen1); acts.appendChild(mk)
-      hint.textContent = '也可以在文件树右键「新建卡组」,或在聊天里让 Tangu 直接写一份 .deck.md(随包 flashcard-format 技能已教会它格式;聊天里建的卡组在文件树里打开一次即进入复习队列)。'
+      hint.textContent = t('guideHint')
     } else {
-      hint.textContent = '当前宿主版本较旧,不支持 .deck.md 一等文件类型:复习台可用,新建 / AI 建卡入口已隐藏。升级 Forsion 桌面端后解锁。'
+      hint.textContent = t('guideHintLegacy')
     }
     main.appendChild(hero)
   }
@@ -1013,17 +1463,17 @@ function mountReview(el) {
     const daily = readDaily()
     const h = document.createElement('div')
     h.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:4px'
-    h.textContent = scope ? '这组暂无到期卡片' : '暂无到期卡片'
+    h.textContent = scope ? t('idleNoneScoped') : t('idleNone')
     const sub = document.createElement('div')
     sub.className = 'fc-muted'
     sub.style.fontSize = '12px'
-    sub.textContent = `今天已复习 ${daily.reviewed} 张` + (meta.freshSkipped ? ` · 还有 ${meta.freshSkipped} 张新卡因每日上限(${dailyLimit()})暂缓,明天见` : '')
+    sub.textContent = t('idleToday', { n: daily.reviewed }) + (meta.freshSkipped ? t('idleHeld', { n: meta.freshSkipped, lim: dailyLimit() }) : '')
     p.appendChild(h); p.appendChild(sub)
     wrap.appendChild(p)
     const cap = document.createElement('div')
     cap.className = 'fc-label'
     cap.style.margin = '16px 2px 2px'
-    cap.textContent = '卡组'
+    cap.textContent = t('decksLabel')
     wrap.appendChild(cap)
     for (const r of rows) {
       const row = document.createElement('div')
@@ -1033,14 +1483,14 @@ function mountReview(el) {
       nm.textContent = r.name
       const ct = document.createElement('span')
       ct.className = 'ct'
-      ct.textContent = `${r.cards} 张 · ${r.due} 到期`
+      ct.textContent = t('deckRowCounts', { cards: r.cards, due: r.due })
       const open = document.createElement('button')
       open.className = 'fc-btn ghost sm'
-      open.textContent = '打开'
+      open.textContent = t('open')
       open.addEventListener('click', () => { if (ctx.app.openFile) ctx.app.openFile(r.path) })
       const rv = document.createElement('button')
       rv.className = 'fc-btn sm'
-      rv.textContent = '复习'
+      rv.textContent = t('review')
       rv.addEventListener('click', () => { scope = { path: r.path, name: r.name }; rebuild({ focus: true }) })
       row.appendChild(nm); row.appendChild(ct)
       if (ftReady) row.appendChild(open)
@@ -1053,11 +1503,11 @@ function mountReview(el) {
       acts.style.marginTop = '14px'
       const gen1 = document.createElement('button')
       gen1.className = 'fc-btn'
-      gen1.textContent = '从当前笔记生成卡组'
+      gen1.textContent = t('genFromNote')
       gen1.addEventListener('click', () => { generateFromNote() })
       const mk = document.createElement('button')
       mk.className = 'fc-btn ghost'
-      mk.textContent = '新建卡组'
+      mk.textContent = t('newDeck')
       mk.addEventListener('click', () => { createDeckInteractive(null) })
       acts.appendChild(gen1); acts.appendChild(mk)
       wrap.appendChild(acts)
@@ -1072,15 +1522,16 @@ function mountReview(el) {
     const daily = readDaily()
     box.innerHTML = `
 <div class="big">🎉</div>
-<div style="font-size:17px;font-weight:600">今日复习完成!</div>
+<div style="font-size:17px;font-weight:600" data-done></div>
 <div class="fc-muted" data-sum style="margin-top:6px;font-size:12.5px"></div>
 <div class="fc-row" style="justify-content:center;margin-top:16px" data-acts></div>`
-    const parts = [`本次复习 ${sessionReviewed} 张`, `今天累计 ${daily.reviewed} 张`]
-    if (num(streak.len, 0) > 1) parts.push(`连续 ${streak.len} 天`)
+    box.querySelector('[data-done]').textContent = t('doneTitle')
+    const parts = [t('doneSession', { n: sessionReviewed }), t('doneToday', { n: daily.reviewed })]
+    if (num(streak.len, 0) > 1) parts.push(t('doneStreak', { n: streak.len }))
     box.querySelector('[data-sum]').textContent = parts.join(' · ')
     const again = document.createElement('button')
     again.className = 'fc-btn ghost'
-    again.textContent = '再查一遍到期卡片'
+    again.textContent = t('doneAgain')
     again.addEventListener('click', () => { sessionReviewed = 0; rebuild({ focus: true }) })
     box.querySelector('[data-acts]').appendChild(again)
     main.appendChild(box)
@@ -1094,11 +1545,11 @@ function mountReview(el) {
     card.className = 'fc-card'
     const dn = document.createElement('div')
     dn.className = 'fc-deckname'
-    dn.textContent = `${it.deckName} · ${it.prev ? '复习' : '新卡'} · 第 ${pos + 1} / ${items.length} 张`
+    dn.textContent = t('cardMeta', { deck: it.deckName, kind: it.prev ? t('review') : t('stateNew'), i: pos + 1, n: items.length })
     card.appendChild(dn)
     const qEl = document.createElement('div')
     qEl.className = 'fc-face'
-    renderMarkdown(qEl, it.q || '(空问题)')
+    renderMarkdown(qEl, it.q || t('emptyQ'))
     card.appendChild(qEl)
     const kbd = document.createElement('div')
     kbd.className = 'fc-kbd'
@@ -1108,23 +1559,23 @@ function mountReview(el) {
       const b = document.createElement('button')
       b.className = 'fc-btn primary'
       b.style.minWidth = '160px'
-      b.textContent = '显示答案'
+      b.textContent = t('showAnswer')
       b.addEventListener('click', () => { flipped = true; render() })
       flipBox.appendChild(b)
       card.appendChild(flipBox)
-      kbd.textContent = '空格 / 回车 翻面'
+      kbd.textContent = t('kbdFlip')
     } else {
       const dv = document.createElement('div')
       dv.className = 'fc-divider'
       card.appendChild(dv)
       const aEl = document.createElement('div')
       aEl.className = 'fc-face'
-      renderMarkdown(aEl, it.a || '(空答案)')
+      renderMarkdown(aEl, it.a || t('emptyA'))
       card.appendChild(aEl)
       const rateRow = document.createElement('div')
       rateRow.className = 'fc-rate'
       const now = Date.now()
-      for (const [g, label] of RATE_KEYS) {
+      for (const [g, label] of rateKeys()) {
         const b = document.createElement('button')
         b.className = 'fc-btn' + (g === 3 ? ' primary' : '')
         const t1 = document.createElement('span')
@@ -1137,7 +1588,7 @@ function mountReview(el) {
         rateRow.appendChild(b)
       }
       card.appendChild(rateRow)
-      kbd.textContent = '按 1-4 评分:1 重来 · 2 困难 · 3 记得 · 4 简单'
+      kbd.textContent = t('kbdRate')
     }
     wrap.appendChild(card)
     wrap.appendChild(kbd)
@@ -1174,8 +1625,11 @@ function mountReview(el) {
     }
   })
 
+  // 语言变了必须**原地**重绘(不重挂):宿主只广播变化,初值走 L()。旧宿主没这个接缝 → 可选链。
+  const offLocale = ctx.subscribeLocale ? ctx.subscribeLocale(() => { if (alive) render() }) : null
+
   rebuild({ focus: true })
-  return () => { alive = false; if (deckTimer) clearTimeout(deckTimer); flushActivity(); offBus(); offTheme() }
+  return () => { alive = false; if (deckTimer) clearTimeout(deckTimer); flushActivity(); offBus(); offTheme(); if (offLocale) offLocale() }
 }
 
 // ══ 卡组编辑视图(registerFileType 的 mount) ═══════════════════════════════════
@@ -1207,22 +1661,25 @@ function mountDeck(el, filePath) {
     if (!dirty || !deck) return
     dirty = false
     try {
-      const t = await ctx.app.readFile(filePath)
-      if (t != null) {
-        const disk = parseDeck(t)
-        deck.fsrs = disk.fsrs
-        deck.preamble = disk.preamble
-        deck.fmExtra = disk.fmExtra
-        deck.fsrsBroken = disk.fsrsBroken
-        deck.fsrsRaw = disk.fsrsRaw
-      }
+      const text = await ctx.app.readFile(filePath)
+      // ⚠️ 读不到就**一律中止**,绝不跳过合并照写:null 有三个来源(文件被删/改名、fs 读失败、
+      //    库根未就位),任何一个下继续写都是灾难 —— 要么用挂载那一刻的陈旧 fsrs 快照把复习台刚
+      //    写进去的进度整体回滚(这段合并存在的理由就是防它),要么把已删/已改名的卡组凭空造回来。
+      //    与 rate() 的 `if (text == null) throw` 同一条纪律。
+      if (text == null) throw new Error(t('deckGone'))
+      const disk = parseDeck(text)
+      deck.fsrs = disk.fsrs
+      deck.preamble = disk.preamble
+      deck.fmExtra = disk.fmExtra
+      deck.fsrsBroken = disk.fsrsBroken
+      deck.fsrsRaw = disk.fsrsRaw
       await ctx.app.writeFile(filePath, serializeDeck(deck))
       await refreshDeckRow(filePath, deck)
       bus.emit({ type: 'decks' })
       if (alive) updateStats()
     } catch (e) {
       dirty = true
-      say(`保存失败:${(e && e.message) || e}`, { level: 'error' })
+      say(t('saveFailed', { err: (e && e.message) || e }), { level: 'error' })
     }
   }
   function updateStats() {
@@ -1234,26 +1691,31 @@ function mountDeck(el, filePath) {
     for (const c of deck.cards) {
       const st = deck.fsrs[c.id]
       if (!st) fresh++
-      else { const t = Date.parse(st.due || ''); if (Number.isFinite(t) && t <= now) due++ }
+      else { const dts = Date.parse(st.due || ''); if (Number.isFinite(dts) && dts <= now) due++ }
     }
-    s.textContent = `${deck.cards.length} 张卡 · ${due} 张到期 · ${fresh} 张新卡` + (deck.fsrsBroken ? ' · fsrs 行损坏(已原样保留,复习暂停)' : '')
+    s.textContent = t('editorStats', { n: deck.cards.length, due, fresh }) + (deck.fsrsBroken ? t('editorStatsBroken') : '')
   }
 
   function render() {
     root.innerHTML = `
 <div class="fc-hdr">
-  <input class="fc-input" data-name style="max-width:260px;font-weight:600" placeholder="卡组名" />
+  <input class="fc-input" data-name style="max-width:260px;font-weight:600" />
   <span class="fc-muted" data-stats style="font-size:11.5px;font-variant-numeric:tabular-nums"></span>
   <span style="flex:1"></span>
-  <button class="fc-btn" data-add>加卡</button>
-  <button class="fc-btn primary" data-review>复习本组</button>
+  <button class="fc-btn" data-add></button>
+  <button class="fc-btn primary" data-review></button>
 </div>
 <div class="fc-body"><div data-list style="max-width:760px;margin:0 auto"></div></div>`
     const nameEl = root.querySelector('[data-name]')
     nameEl.value = deck.name
+    nameEl.setAttribute('placeholder', t('deckNamePh'))
     nameEl.addEventListener('input', () => { deck.name = nameEl.value; scheduleSave() })
-    root.querySelector('[data-add]').addEventListener('click', addCard)
-    root.querySelector('[data-review]').addEventListener('click', async () => {
+    const addBtn = root.querySelector('[data-add]')
+    addBtn.textContent = t('addCard')
+    addBtn.addEventListener('click', addCard)
+    const reviewBtn = root.querySelector('[data-review]')
+    reviewBtn.textContent = t('reviewThisDeck')
+    reviewBtn.addEventListener('click', async () => {
       await flush()
       pendingReview = { path: filePath, name: deck.name }
       bus.emit({ type: 'review-open', path: filePath, name: deck.name })
@@ -1270,7 +1732,7 @@ function mountDeck(el, filePath) {
     if (!deck.cards.length) {
       const d = document.createElement('div')
       d.className = 'fc-empty'
-      d.textContent = '这组还没有卡片。点右上角「加卡」写第一张;或打开一篇笔记,用命令「记忆闪卡:从当前笔记生成卡组」交给 AI。'
+      d.textContent = t('editorEmpty')
       list.appendChild(d)
       return
     }
@@ -1294,7 +1756,7 @@ function mountDeck(el, filePath) {
     sp.style.flex = '1'
     const del = document.createElement('button')
     del.className = 'fc-btn ghost sm danger'
-    del.textContent = '删除'
+    del.textContent = t('delete')
     del.addEventListener('click', () => {
       deck.cards = deck.cards.filter((x) => x.id !== c.id)
       renderList(); updateStats(); scheduleSave()
@@ -1313,8 +1775,8 @@ function mountDeck(el, filePath) {
       ta.addEventListener('input', () => { c[key] = ta.value; scheduleSave() })
       box.appendChild(lab); box.appendChild(ta)
     }
-    mk('问题 Q', 'q', '支持多行 markdown')
-    mk('答案 A', 'a', '答案尽量短')
+    mk(t('qLabel'), 'q', t('qPh'))
+    mk(t('aLabel'), 'a', t('aPh'))
     return box
   }
 
@@ -1327,34 +1789,38 @@ function mountDeck(el, filePath) {
     if (ta) { ta.focus(); if (ta.scrollIntoView) ta.scrollIntoView({ block: 'center' }) }
   }
 
+  /** 只读警示态(读不到 / 不合格式):同样要能跟着语言重绘,所以走 paint 而不是就地写死。 */
+  function warn(key) {
+    root.innerHTML = ''
+    const d = document.createElement('div')
+    d.className = 'fc-empty'
+    d.textContent = t(key)
+    root.appendChild(d)
+  }
+  let mode = 'loading' // loading | missing | invalid | edit
+  function paint() {
+    if (mode === 'missing') { warn('deckMissing'); return }
+    if (mode === 'invalid') { warn('deckInvalid'); return }
+    if (mode === 'edit' && deck) render()
+  }
+
   async function load() {
-    let t = null
-    try { t = await ctx.app.readFile(filePath) } catch { t = null }
+    let text = null
+    try { text = await ctx.app.readFile(filePath) } catch { text = null }
     if (!alive) return
-    if (t == null) {
-      root.innerHTML = ''
-      const d = document.createElement('div')
-      d.className = 'fc-empty'
-      d.textContent = '读不到这个卡组文件(可能已被移动或删除)。'
-      root.appendChild(d)
-      return
-    }
-    const parsed = parseDeck(t)
+    if (text == null) { mode = 'missing'; paint(); return }
+    const parsed = parseDeck(text)
     // 毁档防线:内容非空、又没有 frontmatter、也没解析出任何卡 —— 这不是卡组文件
     // (多半是改错后缀的普通笔记)。进只读警示态,绝不允许用空 deck 把它覆盖掉。
-    if (t.trim() !== '' && !parsed.hadFm && parsed.cards.length === 0) {
-      root.innerHTML = ''
-      const d = document.createElement('div')
-      d.className = 'fc-empty'
-      d.textContent = '这个文件不符合 .deck.md 卡组格式(没有 frontmatter,也没有 <!-- card:cN --> 标记)。为避免误覆盖内容,已停用编辑与自动保存;请手动补格式或改回普通 .md 后缀。'
-      root.appendChild(d)
-      return
-    }
+    if (text.trim() !== '' && !parsed.hadFm && parsed.cards.length === 0) { mode = 'invalid'; paint(); return }
     deck = parsed
     if (!deck.name) deck.name = basename(filePath)
-    render()
+    mode = 'edit'
+    paint()
     refreshDeckRow(filePath, deck).catch(() => { /* 索引下次自愈 */ })
   }
+
+  const offLocale = ctx.subscribeLocale ? ctx.subscribeLocale(() => { if (alive) paint() }) : null
 
   load()
   return () => {
@@ -1362,6 +1828,7 @@ function mountDeck(el, filePath) {
     if (saveTimer) clearTimeout(saveTimer)
     if (dirty && deck) flush().catch(() => { /* 尽力落盘(flush 内部已合并盘上 fsrs) */ })
     offTheme()
+    if (offLocale) offLocale()
   }
 }
 
@@ -1375,7 +1842,7 @@ function mountDeck(el, filePath) {
 async function createDeckInteractive(folder) {
   try {
     const where = folder == null ? null : String(folder)
-    const title = where == null ? '新建卡组' : where === '' ? '在库根目录新建卡组' : `在「${where.split('/').pop()}」中新建卡组`
+    const title = where == null ? t('newDeck') : where === '' ? t('newDeckAtRoot') : t('newDeckInFolder', { folder: where.split('/').pop() })
     const name = await askName(title, '')
     if (!name) return
     const deck = { name, fsrs: {}, cards: [] }
@@ -1385,7 +1852,7 @@ async function createDeckInteractive(folder) {
     bus.emit({ type: 'decks' })
     if (ctx.app.openFile) ctx.app.openFile(path)
   } catch (e) {
-    say(`新建卡组失败:${(e && e.message) || e}`, { level: 'error' })
+    say(t('newDeckFailed', { err: (e && e.message) || e }), { level: 'error' })
   }
 }
 
@@ -1398,35 +1865,50 @@ if (CAN_VIEW && CAN_FT) {
     id: 'deck',
     extensions: ['.deck.md'],
     icon: 'database',
-    title: '卡组',
+    title: t('deckFileType'),
     mount: (el, f) => mountDeck(el, f.filePath),
   }) === false
 }
+// 贡献点标题(命令面板 / 斜杠菜单 / 设置页 / 文件类型 / 新建入口 / 成就系列的标题与描述)取的是**注册时**的语言:
+// 宿主目前不对它们做运行时重解析,语言切换后这些宿主面要等重启才跟上(已知缺口,README 有写)。
+// 不许为它做「语言变了就 teardown 重注册」——会打断进行中的建卡任务与已打开的视图。
 if (!CAN_VIEW) {
-  say('记忆闪卡需要更新版本的 Forsion 桌面端(缺少工作台视图 API),本次未注册任何界面', { level: 'warning' })
+  say(t('warnNoView'), { level: 'warning' })
 } else if (ftRefused) {
-  say('「.deck.md」后缀已被内置文件类型接管,记忆闪卡整体退让,未注册任何入口(请检查插件更新)', { level: 'warning' })
+  say(t('warnTaken'), { level: 'warning' })
 } else {
   ftReady = CAN_FT
-  ctx.registerView({ id: 'review', title: '记忆闪卡', mount: mountReview, singleton: true })
-  if (ctx.registerCommand) ctx.registerCommand({ id: 'flashcards-open', title: '记忆闪卡:打开复习台', keywords: 'flashcards 闪卡 复习 记忆 卡片 间隔重复 fsrs anki review deck', run: () => { if (ctx.openView) ctx.openView('review') } })
-  if (ctx.registerSetting) ctx.registerSetting({ key: 'dailyLimit', label: '每日新卡上限', type: 'number', default: 50, min: 0, max: 999, description: '每天最多引入多少张新卡进入复习队列(到期复习不受限)' })
+  ctx.registerView({ id: 'review', title: t('appName'), mount: mountReview, singleton: true })
+  if (ctx.registerCommand) ctx.registerCommand({ id: 'flashcards-open', title: t('cmdOpen'), keywords: 'flashcards 闪卡 复习 记忆 卡片 间隔重复 fsrs anki review deck spaced repetition', run: () => { if (ctx.openView) ctx.openView('review') } })
+  if (ctx.registerSetting) ctx.registerSetting({ key: 'dailyLimit', label: t('setDailyLimit'), type: 'number', default: 50, min: 0, max: 999, description: t('setDailyLimitDesc') })
+  if (ctx.registerSetting) ctx.registerSetting({ key: 'nudge', label: t('setNudge'), type: 'boolean', default: true, description: t('setNudgeDesc') })
+  // 全局状态栏常驻项(宿主命名空间 plugin:flashcards:due)。数据驱动形态,数字经 handle.update()
+  // 原位更新;2026-07-23 前的宿主返回 void → 拿不到 handle 就整条功能不做(不排定时器、不订语言)。
+  const _statusItem = typeof ctx.registerStatusItem === 'function'
+    ? ctx.registerStatusItem({ id: 'due', text: t('statusNoDeck'), title: t('statusTip', { due: 0, fresh: 0 }), side: 'right', onClick: () => { if (ctx.openView) ctx.openView('review') } })
+    : null
+  statusHandle = _statusItem && typeof _statusItem.update === 'function' ? _statusItem : null
+  if (statusHandle) {
+    // 状态栏文案是少数能实时跟随语言的宿主面(命令面板 / 设置页标题仍是注册时快照,见 README)
+    if (ctx.subscribeLocale) offStatusLocale = ctx.subscribeLocale(() => { paintStatusText() })
+    refreshStatus().catch(() => { }) // 自排程:结尾会 schedulePoll()
+  }
   if (ctx.achievements && ctx.achievements.registerSeries) {
     ctx.achievements.registerSeries({
       id: 'review',
-      title: '记忆闪卡',
+      title: t('appName'),
       achievements: [
-        { id: 'first-review', title: '初试记忆', desc: '完成第一次卡片复习', event: 'review', goal: 1, points: 5 },
-        { id: 'review-100', title: '百炼成钢', desc: '累计复习 100 张卡片', event: 'review', goal: 100, points: 20 },
-        { id: 'streak-7', title: '七日之约', desc: '连续 7 天完成复习', event: 'streak', goal: 7, points: 30 },
+        { id: 'first-review', title: t('achFirstTitle'), desc: t('achFirstDesc'), event: 'review', goal: 1, points: 5 },
+        { id: 'review-100', title: t('ach100Title'), desc: t('ach100Desc'), event: 'review', goal: 100, points: 20 },
+        { id: 'streak-7', title: t('achStreakTitle'), desc: t('achStreakDesc'), event: 'streak', goal: 7, points: 30 },
       ],
     })
   }
   if (ftReady) {
-    if (ctx.registerCommand) ctx.registerCommand({ id: 'flashcards-from-note', title: '记忆闪卡:从当前笔记生成卡组', keywords: 'flashcards 闪卡 生成 建卡 AI deck 笔记', run: () => { generateFromNote() } })
-    if (ctx.registerFileCreator) ctx.registerFileCreator({ id: 'deck-new', label: '新建卡组', icon: 'database', run: (parentFolder) => createDeckInteractive(typeof parentFolder === 'string' ? parentFolder : null) })
+    if (ctx.registerCommand) ctx.registerCommand({ id: 'flashcards-from-note', title: t('cmdFromNote'), keywords: 'flashcards 闪卡 生成 建卡 AI deck 笔记 generate note cards', run: () => { generateFromNote() } })
+    if (ctx.registerFileCreator) ctx.registerFileCreator({ id: 'deck-new', label: t('newDeck'), icon: 'database', run: (parentFolder) => createDeckInteractive(typeof parentFolder === 'string' ? parentFolder : null) })
   } else {
-    say('当前宿主较旧,不支持 .deck.md 一等文件类型:复习台可用,新建 / AI 建卡入口已隐藏(升级桌面端解锁)', { level: 'info' })
+    say(t('warnNoFileType'), { level: 'info' })
   }
 }
 
@@ -1438,13 +1920,25 @@ if (globalThis.__FLASHCARDS_TEST__) {
     readIndex, writeIndex, refreshDeckRow, uniqueDeckPath, buildQueue, folderRoot,
     dayKey, dayDiff, readDaily, writeDaily, dailyLimit, updateStreak,
     inline, renderMarkdown, fmtDelta, stateLabel,
+    MSG, L, t, rateKeys, UNTITLED_DECK,
     onColorOf, readableOn, contrast, GEN_PROMPT, stageOf, gen,
     clipNote, escapeCardLine, unescapeCardLine, generateFromNote, bus,
+    deckCounts, dueSummary, isIndexStale, shouldNudge, nudgeOn,
+    paintStatus, paintStatusText, refreshStatus, STATUS_POLL,
+    statusPeek: () => ({ n: statusLast.n, due: statusLast.due, fresh: statusLast.fresh, decks: statusLast.decks, timer: !!statusPollTimer, disposed: statusDisposed, nudged: nudgedSession }),
     peekPending: () => pendingReview,
   })
 }
 
 return () => {
+  // statusDisposed 不可省:重臂发生在 refreshStatus 的尾部,只清 timer 会被**正在飞的那一次**
+  // refresh 重新排上 → 泄漏一个 5 分钟定时器(node check.mjs 会当场挂死)。
+  statusDisposed = true
+  if (statusPollTimer) { clearTimeout(statusPollTimer); statusPollTimer = null }
+  if (statusHandle && typeof statusHandle.dispose === 'function') { try { statusHandle.dispose() } catch { /* ignore */ } }
+  statusHandle = null // 之后所有 paintStatus / refreshStatus 自动成 no-op
+  if (offStatusLocale) { try { offStatusLocale() } catch { /* ignore */ } }
+  offStatusLocale = null
   if (gen.controller) gen.controller.abort() // 未完成的建卡任务收干净
   if (_layer && _layer.remove) _layer.remove()
 }

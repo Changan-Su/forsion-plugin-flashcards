@@ -1,9 +1,11 @@
 {
   "id": "flashcards",
   "name": "记忆闪卡",
-  "version": "1.0.0",
+  "nameEn": "Flashcards",
+  "version": "1.2.2",
   "apiVersion": 1,
   "description": "`.deck.md` 卡组文件 + FSRS 间隔重复复习台。卡片与复习进度全部存在本地笔记库(卡组 = 一等 .deck.md 文件,调度状态在文件 frontmatter 里,索引在插件工作文件夹,默认「记忆闪卡」);「从当前笔记生成卡组」会把当前笔记全文发送到你登录的 Forsion/Tangu 后端由 AI 出卡,除此之外数据不出本机。随包附带 flashcard-format 技能,让 Tangu 在聊天里也能直接建/改卡组而不破坏复习进度。",
+  "descriptionEn": "`.deck.md` deck files plus an FSRS spaced-repetition review board. Cards and review progress live entirely in your local vault: a deck is a first-class .deck.md file, its schedule sits in the file frontmatter, and the index sits in the plugin work folder. \"Generate deck from note\" sends the full text of the current note to the Forsion/Tangu backend you are signed in to so the AI can draft cards; nothing else leaves your machine. The bundled flashcard-format skill teaches Tangu to create and edit decks in chat without breaking review progress.",
   "main": "main.js",
   "fileExtensions": [".deck.md"],
   "events": [
@@ -29,6 +31,27 @@
         "description": "随包的 flashcard-format 技能教会了 Tangu .deck.md 的真实格式(card 标记 + fsrs 状态行)。在聊天里直接说「帮我把这篇笔记做成闪卡」也能得到规范的卡组文件——建好后在文件树里打开一次,它就会进入复习队列。"
       }
     ],
+    "en": {
+      "intro": "Flashcards turns what you learn into question-and-answer cards and lets FSRS spaced repetition decide what to review each day. A deck is a .deck.md file in your vault, so it backs up, syncs, and can be read and written by Tangu directly.",
+      "steps": [
+        {
+          "title": "Make a deck",
+          "description": "Right-click empty space in the file tree, or a folder, and pick \"New deck\" — it opens as soon as it is created. The deck editor lets you rewrite questions and answers and add or delete cards in place. Editing the text never disturbs a card's review progress."
+        },
+        {
+          "title": "Let the AI draft cards from a note",
+          "description": "Open a note and run \"Flashcards: Generate deck from note\" from the command palette. Progress shows at the top of the review board and can be cancelled at any time; the finished deck lands in the plugin work folder."
+        },
+        {
+          "title": "Review every day",
+          "description": "Run \"Flashcards: Open review board\". Space or Enter flips the card, 1-4 grades it (Again / Hard / Good / Easy), and FSRS schedules when it comes back. The daily new-card limit is in the plugin settings (50 by default)."
+        },
+        {
+          "title": "Teach Tangu the deck format",
+          "description": "The bundled flashcard-format skill taught Tangu the real .deck.md format (card markers plus the fsrs state line). Asking it in chat to turn a note into flashcards produces a proper deck file — open it once in the file tree and it joins the review queue."
+        }
+      ]
+    },
     "settings": true
   }
 }
