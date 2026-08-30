@@ -1856,6 +1856,49 @@ async function createDeckInteractive(folder) {
   }
 }
 
+// ── 统一左栏列表源(宿主 2026-08-25+;可选链,老宿主静默跳过) ─────────────────────
+// 卡组清单交给宿主统一左栏渲染(与会话/笔记行同一套 UI);点一行 = 只复习这一组。
+// 插件对界面无状态:搜索词由宿主持有,经 items({query}) 回传。卡组之间没有文件夹层级,故不给 groups()。
+let deckCache = [] // items() 必须同步且便宜 —— 索引的同步快照,绝不在 items() 里读盘
+function registerDeckList() {
+  if (!ctx.registerListSource) return
+  const listSubs = new Set()
+  const fireList = () => listSubs.forEach((f) => { try { f() } catch { /* ignore */ } })
+  // ⚠️ 索引三态照旧:ok:false(读失败/坏 JSON)一律**保留上一份**,绝不当成「没有卡组」清空列表。
+  //    另:插件在宿主**启动期**装载,那时活动库还没恢复,readFile 静默给 null → 只在 setup 里读一次
+  //    的话列表会永久空着(青鸟 2026-08-28 实报的同一个坑)。宿主挂载列表面/切库都会重订阅。
+  const listReload = () => readIndex().then((r) => { if (r.ok) deckCache = r.decks || []; fireList() }, () => { /* 保留上一份 */ })
+  bus.on((e) => { if (e.type === 'decks') void listReload() })
+  ctx.registerListSource({
+    id: 'deck-list',
+    title: t('appName'),
+    search: true,
+    items: (f) => {
+      const q = ((f && f.query) || '').trim().toLowerCase()
+      return deckCache
+        .filter((r) => r && r.path)
+        .filter((r) => !q || String(r.name || '').toLowerCase().includes(q))
+        .map((r) => ({
+          key: r.path,
+          title: r.name || basename(r.path),
+          // 右侧数字 = 今天到期张数(纯数字,语言中立,不进词表);没有就留空,不画 0。
+          hint: r.due ? String(r.due) : '',
+          icon: 'database', // 与 .deck.md 文件类型的树图标同一枚
+        }))
+    },
+    actions: ctx.registerFileCreator ? [{ id: 'new', label: t('newDeck'), run: () => { createDeckInteractive(null) } }] : undefined,
+    subscribe: (cb) => { listSubs.add(cb); void listReload(); return () => listSubs.delete(cb) },
+    // 与编辑视图「复习本组」同一条路:置 pendingReview + 播总线(视图已挂载就现场换范围)。
+    open: (item) => {
+      const row = deckCache.find((r) => r.path === item.key)
+      const name = (row && row.name) || basename(item.key)
+      pendingReview = { path: item.key, name }
+      bus.emit({ type: 'review-open', path: item.key, name })
+      if (ctx.openView) ctx.openView('review')
+    },
+  })
+}
+
 // ── 注册(能力探测阶梯:老宿主优雅降级,setup 绝不抛错) ──────────────────────
 const CAN_VIEW = typeof ctx.registerView === 'function'
 const CAN_FT = typeof ctx.registerFileType === 'function'
@@ -1878,7 +1921,8 @@ if (!CAN_VIEW) {
   say(t('warnTaken'), { level: 'warning' })
 } else {
   ftReady = CAN_FT
-  ctx.registerView({ id: 'review', title: t('appName'), mount: mountReview, singleton: true })
+  ctx.registerView({ id: 'review', title: t('appName'), mount: mountReview, singleton: true, workspaceSource: 'deck-list' })
+  registerDeckList()
   if (ctx.registerCommand) ctx.registerCommand({ id: 'flashcards-open', title: t('cmdOpen'), keywords: 'flashcards 闪卡 复习 记忆 卡片 间隔重复 fsrs anki review deck spaced repetition', run: () => { if (ctx.openView) ctx.openView('review') } })
   if (ctx.registerSetting) ctx.registerSetting({ key: 'dailyLimit', label: t('setDailyLimit'), type: 'number', default: 50, min: 0, max: 999, description: t('setDailyLimitDesc') })
   if (ctx.registerSetting) ctx.registerSetting({ key: 'nudge', label: t('setNudge'), type: 'boolean', default: true, description: t('setNudgeDesc') })

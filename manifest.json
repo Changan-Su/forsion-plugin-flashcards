@@ -2,7 +2,7 @@
   "id": "flashcards",
   "name": "记忆闪卡",
   "nameEn": "Flashcards",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "apiVersion": 1,
   "description": "`.deck.md` 卡组文件 + FSRS 间隔重复复习台。卡片与复习进度全部存在本地笔记库(卡组 = 一等 .deck.md 文件,调度状态在文件 frontmatter 里,索引在插件工作文件夹,默认「记忆闪卡」);「从当前笔记生成卡组」会把当前笔记全文发送到你登录的 Forsion/Tangu 后端由 AI 出卡,除此之外数据不出本机。随包附带 flashcard-format 技能,让 Tangu 在聊天里也能直接建/改卡组而不破坏复习进度。",
   "descriptionEn": "`.deck.md` deck files plus an FSRS spaced-repetition review board. Cards and review progress live entirely in your local vault: a deck is a first-class .deck.md file, its schedule sits in the file frontmatter, and the index sits in the plugin work folder. \"Generate deck from note\" sends the full text of the current note to the Forsion/Tangu backend you are signed in to so the AI can draft cards; nothing else leaves your machine. The bundled flashcard-format skill teaches Tangu to create and edit decks in chat without breaking review progress.",

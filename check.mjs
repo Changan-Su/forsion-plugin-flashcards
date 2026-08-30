@@ -69,7 +69,7 @@ A.equal(asi.length, 0, `以 ( [ 开头的行会被 ASI 粘到上一句:第 ${asi
 const man = JSON.parse(readFileSync(new URL('./manifest.json', import.meta.url), 'utf8'))
 A.equal(man.id, 'flashcards', 'manifest id 钉死 flashcards')
 A.equal(man.name, '记忆闪卡')
-A.equal(man.version, '1.2.2')
+A.equal(man.version, '1.3.0')
 A.equal(man.apiVersion, 1)
 A.equal(man.main, 'main.js')
 // 双语 manifest:中文是 canonical(任何宿主都显示得出),英文另开字段;旧宿主忽略新字段
@@ -178,7 +178,7 @@ const buttonByText = (node, text) => findAll(node, 'button').find((b) => String(
 
 // ── 求值 main.js(新宿主全量 ctx) ──
 globalThis.__FLASHCARDS_TEST__ = {}
-const reg = { views: [], commands: [], settings: [], fileTypes: [], creators: [], series: [], notices: [], statusItems: [] }
+const reg = { views: [], commands: [], settings: [], fileTypes: [], creators: [], series: [], notices: [], statusItems: [], listSources: [] }
 const tracked = []
 const activityLog = []
 const ctx = {
@@ -188,6 +188,7 @@ const ctx = {
   registerFileType: (f) => { reg.fileTypes.push(f) }, // 返回 undefined(非 false)= 未被内置抢占
   registerFileCreator: (f) => reg.creators.push(f),
   registerStatusItem: (it) => { reg.statusItems.push(it); return { update() { }, dispose() { } } },
+  registerListSource: (x) => reg.listSources.push(x), // 统一左栏数据源(宿主 2026-08-25+)
   notify: (m) => reg.notices.push(m),
   openView() { },
   achievements: { registerSeries: (s) => reg.series.push(s), track: (e, n) => tracked.push([e, n == null ? 1 : n]) },
@@ -1614,4 +1615,39 @@ A.equal(rejections.length, 0, `1.2.0 新增小节存在未处理拒绝:${rejecti
   V.set('记忆闪卡/.deck-index.json', IDX0)
 }
 
-console.log(`check ok [TZ=${process.env.FC_TZ}] — 贡献点/FSRS 向量(含钳制)/契约往返(保真三防线)/围栏解析(内嵌代码块)/ID 分配/XSS/索引自愈/队列/连击/挂载冒烟(焦点·合并写·守卫·创建契约)/双语(键集合·en 真渲·切换即变·退订)/旧宿主两档/内置退让/状态栏(口径不变式·三态·索引自愈·泄漏防线·提醒 P0)/v4 路由/活动页写保护/[08-21 回归]占位判定不信 readFile 的 null·索引读失败不落盘 全部通过`)
+// ── 统一左栏列表源(1.3.0):注册 + 订阅即重读 + 读失败保留上一份 + open 交给复习台 ──
+// ⚠️「订阅即重读」是这条接缝的头号坑:插件在宿主**启动期**装载,那时活动库还没恢复,
+//    ctx.app.readFile 静默给 null → 列表定格为空且此后无人再喊它(青鸟 2026-08-28 实报)。
+{
+  const LS = reg.listSources.find((x) => x.id === 'deck-list')
+  A.ok(LS, '应注册 deck-list 列表源')
+  A.equal(reg.views.find((v) => v.id === 'review').workspaceSource, 'deck-list', 'review 视图应声明 workspaceSource(裸源 id)')
+  V.set('记忆闪卡/.deck-index.json', JSON.stringify({ decks: [
+    { path: '记忆闪卡/订阅后.deck.md', name: '订阅后才读得到', cards: 3, due: 2, fresh: 0 },
+    { path: '记忆闪卡/无到期.deck.md', name: '一张也不到期', cards: 4, due: 0, fresh: 0 },
+  ] }))
+  A.ok(!LS.items({}).some((r) => r.key === '记忆闪卡/订阅后.deck.md'), '前提:此刻列表源还没读过这份新索引')
+  const off = LS.subscribe(() => {})
+  await new Promise((r) => setTimeout(r, 10))
+  const rows = LS.items({})
+  A.equal(rows.length, 2, 'subscribe() 必须触发一次重读,否则启动期读空的列表永远回不来')
+  A.equal(rows[0].hint, '2', '右侧数字 = 今天到期张数')
+  A.equal(rows[1].hint, '', '零到期不画 0')
+  A.equal(rows[0].icon, 'database', '行首图标与 .deck.md 文件类型同一枚词表键')
+  A.deepEqual(LS.items({ query: '一张' }).map((r) => r.key), ['记忆闪卡/无到期.deck.md'], '搜索匹配卡组名')
+  // 索引读失败(坏 JSON → ok:false)必须**保留上一份**,不许清空成「没有卡组」
+  V.set('记忆闪卡/.deck-index.json', '{坏掉的')
+  await LS.subscribe(() => {})()
+  await new Promise((r) => setTimeout(r, 10))
+  A.equal(LS.items({}).length, 2, '索引读失败保留上一份列表,绝不清空')
+  const opened = []
+  const realOpen = ctx.openView
+  ctx.openView = (v) => opened.push(v)
+  LS.open({ key: '记忆闪卡/订阅后.deck.md' })
+  ctx.openView = realOpen
+  A.deepEqual(opened, ['review'], 'open() 应把卡组交给复习台')
+  A.equal(typeof off, 'function', 'subscribe() 须返回退订函数')
+  off()
+}
+
+console.log(`check ok [TZ=${process.env.FC_TZ}] — 贡献点/FSRS 向量(含钳制)/契约往返(保真三防线)/围栏解析(内嵌代码块)/ID 分配/XSS/索引自愈/队列/连击/挂载冒烟(焦点·合并写·守卫·创建契约)/双语(键集合·en 真渲·切换即变·退订)/旧宿主两档/内置退让/状态栏(口径不变式·三态·索引自愈·泄漏防线·提醒 P0)/v4 路由/活动页写保护/统一左栏列表源/[08-21 回归]占位判定不信 readFile 的 null·索引读失败不落盘 全部通过`)
