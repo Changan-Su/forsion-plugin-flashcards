@@ -2,6 +2,7 @@
   "id": "flashcards",
   "name": { "zh": "记忆闪卡", "en": "Flashcards" },
   "icon": "target",
+  "iconFile": "icon.png",
   "version": "1.0.0",
   "layout": {
     "main": [{ "type": "plugin:flashcards:review" }]
